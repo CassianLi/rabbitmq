@@ -8,44 +8,64 @@ import (
 	"time"
 )
 
+// DeclareParams exchange and queue declare params
+type DeclareParams struct {
+	Durable    bool       // 持久化,默认true
+	AutoDelete bool       // 自动删除,默认false
+	Exclusive  bool       // 排他性,默认false
+	NoWait     bool       // 不等待,默认false
+	Args       amqp.Table // 额外参数
+}
+
+// ConnectionOptions 重连等配置参数
+type ConnectionOptions struct {
+	Heartbeat         time.Duration // 心跳间隔,默认0,不开启
+	ReConnectInterval time.Duration // 重连间隔,默认0,不重连
+	MaxReconnects     int           // 最大重连次数,默认0,不限制
+}
+
+type ConsumerOptions struct {
+	AutoAck         bool             // 是否自动确认消息,默认false
+	Exclusive       bool             // 是否排他性,默认false
+	RecoverConsumer bool             // 是否在重连后恢复消费者,默认false
+	Callback        func(msg string) // 消费者回调函数
+}
+
 type RabbitMQ struct {
-	conn              *amqp.Connection
-	channel           *amqp.Channel
-	exchange          string
-	exchangeType      string
-	queue             string
-	connected         bool             // Track connection status
-	reConnectInterval time.Duration    // Reconnection interval in seconds,default is 5s
-	maxReconnects     int              // Maximum number of reconnection attempts, default is 0 for unlimited
-	recoverConsumer   bool             // Whether to recover consumer when connection re-established, default is false
-	autoAck           bool             // Whether to auto ack message, default is false
-	callback          func(msg string) // Callback function to process message
+	exchange     string
+	queue        string
+	exchangeType string
+	extraParams  DeclareParams // exchange and queue extra params
 
+	connectionOptions ConnectionOptions // 重连等配置参数
+
+	consumerOptions ConsumerOptions // 消费者配置参数
+
+	conn      *amqp.Connection
+	channel   *amqp.Channel
+	connected bool // Track connection status
 }
 
+// NewDefaultRabbitMQ Create a publisher with default options
 func NewDefaultRabbitMQ(amqpURI, exchange, exchangeType, queue string, autoCreate bool) (*RabbitMQ, error) {
-	return NewRabbitMQ(amqpURI, exchange, exchangeType, queue, 0, 0, 0, autoCreate, false)
+	return NewRabbitMQ(amqpURI, exchange, exchangeType, queue, ConnectionOptions{}, autoCreate, DeclareParams{Durable: true})
 }
 
-// NewRecoverRabbitMQ Create a new RabbitMQ instance,
-// heartbeat is the interval of heartbeats, set to 0 to disable
-// reConnectInterval is the reconnection interval in seconds, default is 0, which means no reconnection
-// maxReconnects is the maximum number of reconnection attempts, default is 0 for unlimited
-func NewRecoverRabbitMQ(amqpURI, exchange, exchangeType, queue string, autoCreate bool, heartbeat, reConnectInterval time.Duration, maxReconnects int) (*RabbitMQ, error) {
-	return NewRabbitMQ(amqpURI, exchange, exchangeType, queue, heartbeat, reConnectInterval, maxReconnects, autoCreate, true)
-}
-
-// NewRabbitMQ Create a new RabbitMQ instance,
-//
-//	with exchange declared if needed,
-//	heartbeat is the interval of heartbeats, set to 0 to disable
-//	reConnectInterval is the reconnection interval in seconds, default is 0, which means no reconnection
-//	maxReconnects is the maximum number of reconnection attempts, default is 0 for unlimited
-//	autoCreate is used to create exchange and queue if needed
-func NewRabbitMQ(amqpURI, exchange, exchangeType, queue string, heartbeat, reConnectInterval time.Duration, maxReconnects int, autoCreate, recoverConsumer bool) (*RabbitMQ, error) {
+// NewRabbitMQ Create a new instance of RabbitMQ
+// amqpURI: amqp://guest:guest@localhost:5672/
+// exchange: exchange name
+// exchangeType: exchange type, default direct
+// queue: queue name
+// connectionOptions: connection options
+// autoCreate: auto create exchange and queue if not exists
+// declareParams: exchange and queue declare params
+func NewRabbitMQ(amqpURI, exchange, exchangeType, queue string, connectionOptions ConnectionOptions, autoCreate bool, declareParams DeclareParams) (*RabbitMQ, error) {
 	if exchangeType == "" {
 		exchangeType = "direct"
+	}
 
+	if queue == "" {
+		return nil, errors.New("queue name is empty")
 	}
 
 	mq := &RabbitMQ{
@@ -54,15 +74,12 @@ func NewRabbitMQ(amqpURI, exchange, exchangeType, queue string, heartbeat, reCon
 		exchange:          exchange,
 		exchangeType:      exchangeType,
 		queue:             queue,
+		connectionOptions: connectionOptions,
 		connected:         false, // Initialize as disconnected
-		reConnectInterval: reConnectInterval,
-		maxReconnects:     maxReconnects,
-		recoverConsumer:   recoverConsumer,
-		autoAck:           false,
 	}
 
 	// Try to establish the initial connection
-	err := mq.connectToBroker(amqpURI, heartbeat, autoCreate)
+	err := mq.connectToBroker(amqpURI, autoCreate, declareParams)
 	if err != nil {
 		mq.connected = false
 		log.Printf("failed to connect initially: %v", err)
@@ -71,20 +88,20 @@ func NewRabbitMQ(amqpURI, exchange, exchangeType, queue string, heartbeat, reCon
 	}
 
 	// Start a goroutine to handle reconnection
-	if reConnectInterval > 0 && mq.connected {
+	if connectionOptions.ReConnectInterval > 0 && mq.connected {
 		// Start a goroutine to handle reconnection
-		go mq.reconnectLoop(amqpURI, heartbeat, autoCreate)
+		go mq.reconnectLoop(amqpURI, autoCreate, declareParams)
 	}
 
 	return mq, nil
 }
 
 // connectToBroker Connect to the broker
-func (mq *RabbitMQ) connectToBroker(amqpURI string, heartbeat time.Duration, autoCreate bool) error {
+func (mq *RabbitMQ) connectToBroker(amqpURI string, autoCreate bool, params DeclareParams) error {
 	var err error
-	if heartbeat > 0 {
+	if mq.connectionOptions.Heartbeat > 0 {
 		mq.conn, err = amqp.DialConfig(amqpURI, amqp.Config{
-			Heartbeat: heartbeat,
+			Heartbeat: mq.connectionOptions.Heartbeat,
 		})
 	} else {
 		mq.conn, err = amqp.Dial(amqpURI)
@@ -96,13 +113,15 @@ func (mq *RabbitMQ) connectToBroker(amqpURI string, heartbeat time.Duration, aut
 
 	mq.channel, err = mq.conn.Channel()
 	if err != nil {
-		return err
-	}
-
-	// Auto-create queue and exchange if enabled
-	if autoCreate {
-		err = mq.setupExchangeAndQueue()
-		if err != nil {
+		log.Printf("failed to open channel: %v", err)
+		// Auto-create queue and exchange if enabled
+		if autoCreate {
+			err = mq.setupExchangeAndQueue(params)
+			if err != nil {
+				log.Printf("auto-creating queue and exchange: %v", err)
+				return err
+			}
+		} else {
 			return err
 		}
 	}
@@ -111,32 +130,31 @@ func (mq *RabbitMQ) connectToBroker(amqpURI string, heartbeat time.Duration, aut
 }
 
 // reconnectLoop Reconnect to the server in case it goes down, with exponential backoff
-func (mq *RabbitMQ) reconnectLoop(amqpURI string, heartbeat time.Duration, autoCreate bool) {
+func (mq *RabbitMQ) reconnectLoop(amqpURI string, autoCreate bool, params DeclareParams) {
 	log.Println("starting reconnect loop")
-
 	reconnectCount := 0 // Initialize reconnect count
 
 	for {
 		// Check if maximum reconnection attempts reached
-		if mq.maxReconnects > 0 && reconnectCount >= mq.maxReconnects {
-			log.Printf("exceeded maximum reconnection attempts (%d), giving up", mq.maxReconnects)
+		if mq.connectionOptions.MaxReconnects > 0 && reconnectCount >= mq.connectionOptions.MaxReconnects {
+			log.Printf("exceeded maximum reconnection attempts (%d), giving up", mq.connectionOptions.MaxReconnects)
 			return
 		}
 
 		for !mq.connected {
 			// Try to establish the initial connection
-			err := mq.connectToBroker(amqpURI, heartbeat, autoCreate)
+			err := mq.connectToBroker(amqpURI, autoCreate, params)
 			if err != nil {
-				time.Sleep(mq.reConnectInterval) // Wait before the next reconnection attempt
-				log.Printf("trying to reconnect failed, (attempt %d, after: %v)", reconnectCount+1, mq.reConnectInterval)
+				time.Sleep(mq.connectionOptions.ReConnectInterval) // Wait before the next reconnection attempt
+				log.Printf("trying to reconnect failed, (attempt %d, after: %v)", reconnectCount+1, mq.connectionOptions.ReConnectInterval)
 				// Increment reconnect count
 				reconnectCount++
 			} else {
 				mq.connected = true
 				log.Println("reconnected successfully")
-				log.Println("recoverConsumer: ", mq.recoverConsumer)
 
-				if mq.recoverConsumer {
+				if mq.consumerOptions.RecoverConsumer {
+					log.Printf("recovering consumer...")
 					// Recover consumer
 					// Connection restored, restart message consumption
 					err := mq.startConsume()
@@ -169,31 +187,34 @@ func (mq *RabbitMQ) Close() {
 }
 
 // setupExchangeAndQueue Declare exchange and queue
-func (mq *RabbitMQ) setupExchangeAndQueue() error {
+func (mq *RabbitMQ) setupExchangeAndQueue(params DeclareParams) error {
+	log.Printf("declaring exchange (%s)", mq.exchange)
 	// Declare exchange
 	if mq.exchange != "" {
 		err := mq.channel.ExchangeDeclare(
 			mq.exchange,
 			mq.exchangeType,
-			true,
-			false,
-			false,
-			false,
-			nil,
+			params.Durable,
+			params.AutoDelete,
+			params.Exclusive,
+			params.NoWait,
+			params.Args,
 		)
 		if err != nil {
 			return err
 		}
 	}
 
+	log.Printf("declaring queue (%s)", mq.queue)
+
 	// Declare queue
 	_, err := mq.channel.QueueDeclare(
 		mq.queue,
-		true,
-		false,
-		false,
-		false,
-		nil,
+		params.Durable,
+		params.AutoDelete,
+		params.Exclusive,
+		params.NoWait,
+		params.Args,
 	)
 	if err != nil {
 		return err
@@ -205,7 +226,7 @@ func (mq *RabbitMQ) setupExchangeAndQueue() error {
 			mq.queue,
 			"",
 			mq.exchange,
-			false,
+			params.NoWait,
 			nil,
 		)
 		if err != nil {
@@ -219,7 +240,7 @@ func (mq *RabbitMQ) setupExchangeAndQueue() error {
 // Publish  a message to the queue, creating the queue if needed
 func (mq *RabbitMQ) Publish(body []byte) error {
 	// Publish 不允许设置重连
-	if mq.reConnectInterval > 0 {
+	if mq.connectionOptions.ReConnectInterval > 0 {
 		return errors.New("reconnect is not allowed when publishing message, please use NewDefaultRabbitMQ to create RabbitMQ instance")
 	}
 	if !mq.connected {
@@ -242,7 +263,6 @@ func (mq *RabbitMQ) Publish(body []byte) error {
 
 // startConsume Start consuming messages
 func (mq *RabbitMQ) startConsume() error {
-	log.Println(mq.autoAck)
 	if !mq.connected {
 		return errors.New("not connected to RabbitMQ")
 	}
@@ -250,7 +270,7 @@ func (mq *RabbitMQ) startConsume() error {
 	deliveries, err := mq.channel.Consume(
 		mq.queue,
 		"",
-		mq.autoAck,
+		mq.consumerOptions.AutoAck,
 		false,
 		false,
 		false,
@@ -264,12 +284,12 @@ func (mq *RabbitMQ) startConsume() error {
 		msg := string(d.Body)
 
 		// Process message
-		if mq.callback == nil {
+		if mq.consumerOptions.Callback == nil {
 			return errors.New("callback function is not set")
 		}
-		mq.callback(msg)
+		mq.consumerOptions.Callback(msg)
 
-		if !mq.autoAck {
+		if !mq.consumerOptions.AutoAck {
 			if err := mq.sendAckMsg(d, 5, 5*time.Second); err != nil {
 				log.Printf("failed to ack msg: %s, err: %v", msg, err)
 			}
@@ -281,9 +301,13 @@ func (mq *RabbitMQ) startConsume() error {
 
 // Consume start consuming messages, autoAck is used to set auto ack message or not
 // callback is the function to process message
-func (mq *RabbitMQ) Consume(autoAck bool, callback func(msg string)) error {
-	mq.autoAck = autoAck
-	mq.callback = callback
+func (mq *RabbitMQ) Consume(autoAck, exclusive, recover bool, callback func(msg string)) error {
+	mq.consumerOptions = ConsumerOptions{
+		AutoAck:         autoAck,
+		Exclusive:       exclusive,
+		RecoverConsumer: recover,
+		Callback:        callback,
+	}
 
 	return mq.startConsume()
 }

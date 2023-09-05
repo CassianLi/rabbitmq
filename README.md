@@ -1,106 +1,138 @@
-# RabbitMQ Go 客户端库说明
+以下是更新后的README.md文档，其中包括如何使用这个客户端以及注意事项：
 
-这是一个用于连接和操作 RabbitMQ 的 Go 语言客户端库。它提供了一种简单的方式来处理 RabbitMQ 连接、消息发布和消费。
+# RabbitMQ Go 客户端
+
+RabbitMQ Go 客户端是一个用于与 RabbitMQ 通信的 Go 语言库。它允许您轻松地创建、发布和消费消息，同时提供了灵活的配置选项。
 
 ## 安装
 
-你可以使用以下命令通过 Go get 安装此库：
+使用以下命令安装 RabbitMQ Go 客户端库：
 
-```bash
+```
 go get github.com/JokerLiAnother/rabbitmq
 ```
 
 ## 使用示例
 
-以下是一个简单的示例，演示如何使用此库来连接 RabbitMQ、发布消息和消费消息：
+### 创建 RabbitMQ 实例
+
+要使用 RabbitMQ Go 客户端，首先创建一个 `RabbitMQ` 实例。您可以选择使用默认选项或自定义配置。以下是创建实例的两种方法：
+
+#### 使用默认选项
 
 ```go
-package main
-
 import (
-	"fmt"
-	"log"
-	"time"
-
-	"github.com/JokerLiAnother/rabbitmq"
+    "github.com/your/package/rabbitmq"
 )
 
 func main() {
-	// 创建一个 RabbitMQ 实例
-	rabbitURI := "amqp://guest:guest@localhost:5672/"
-	exchange := "myexchange"
-	exchangeType := "direct"
-	queue := "myqueue"
+    // 使用默认选项创建 RabbitMQ 实例
+    mq, err := rabbitmq.NewDefaultRabbitMQ("amqp://guest:guest@localhost:5672/", "my_exchange", "direct", "my_queue", true)
+    if err != nil {
+        log.Fatalf("Failed to create RabbitMQ instance: %v", err)
+    }
 
-	rabbit, err := rabbitmq.NewDefaultRabbitMQ(rabbitURI, exchange, exchangeType, queue, true)
-	if err != nil {
-		log.Fatalf("无法创建 RabbitMQ 实例: %v", err)
-	}
-	defer rabbit.Close()
+    defer mq.Close()
 
-	// 发布消息
-	message := []byte("Hello, RabbitMQ!")
-	err = rabbit.Publish(message)
-	if err != nil {
-		log.Printf("无法发布消息: %v", err)
-	}
-
-	// 消费消息
-	consumerCallback := func(msg string) {
-		fmt.Printf("收到消息: %s\n", msg)
-	}
-
-	err = rabbit.Consume(false, consumerCallback, true)
-	if err != nil {
-		log.Printf("无法启动消费者: %v", err)
-	}
-
-	// 等待一段时间，以便消费消息
-	time.Sleep(10 * time.Second)
+    // 其他操作...
 }
 ```
 
-## 构造函数
-
-此库提供了几种构造函数来创建 RabbitMQ 实例：
-
-### NewDefaultRabbitMQ
+#### 自定义配置
 
 ```go
-func NewDefaultRabbitMQ(amqpURI, exchange, exchangeType, queue string, autoCreate bool) (*RabbitMQ, error)
+import (
+    "github.com/your/package/rabbitmq"
+)
+
+func main() {
+    // 自定义配置创建 RabbitMQ 实例
+    connectionOptions := rabbitmq.ConnectionOptions{
+        Heartbeat:         30 * time.Second,
+        ReConnectInterval: 10 * time.Second,
+        MaxReconnects:     5,
+    }
+
+    declareParams := rabbitmq.DeclareParams{
+        Durable:    true,
+        AutoDelete: false,
+        Exclusive:  false,
+        NoWait:     false,
+        Args:       nil,
+    }
+
+    mq, err := rabbitmq.NewRabbitMQ("amqp://guest:guest@localhost:5672/", "my_exchange", "direct", "my_queue", connectionOptions, true, declareParams)
+    if err != nil {
+        log.Fatalf("Failed to create RabbitMQ instance: %v", err)
+    }
+
+    defer mq.Close()
+
+    // 其他操作...
+}
 ```
 
-此构造函数创建一个默认的 RabbitMQ 实例，不启用连接恢复机制。
-
-### NewRecoverRabbitMQ
+### 发布消息
 
 ```go
-func NewRecoverRabbitMQ(amqpURI, exchange, exchangeType, queue string, heartbeat, reConnectInterval time.Duration, maxReconnects int) (*RabbitMQ, error)
+// 发布消息到队列
+func publishMessage(mq *rabbitmq.RabbitMQ, message string) {
+    body := []byte(message)
+    if err := mq.Publish(body); err != nil {
+        log.Printf("Failed to publish message: %v", err)
+    }
+}
 ```
 
-此构造函数创建一个启用连接恢复机制的 RabbitMQ 实例。你可以指定心跳间隔、重连间隔和最大重连次数。
-
-### NewRabbitMQ
+### 消费消息
 
 ```go
-func NewRabbitMQ(amqpURI, exchange, exchangeType, queue string, heartbeat, reConnectInterval time.Duration, maxReconnects int, autoCreate bool) (*RabbitMQ, error)
+// 消费消息
+func consumeMessages(mq *rabbitmq.RabbitMQ) {
+    callback := func(msg string) {
+        log.Printf("Received message: %s", msg)
+        // 处理消息...
+    }
+
+    if err := mq.Consume(false, false, false, callback); err != nil {
+        log.Printf("Failed to start consuming messages: %v", err)
+    }
+}
 ```
 
-此构造函数创建一个自定义的 RabbitMQ 实例，你可以指定是否启用连接恢复机制、心跳间隔、重连间隔和最大重连次数。
+## 配置选项
 
-## 消费者恢复
+### DeclareParams
 
-如果启用了连接恢复机制，当连接重新建立时，消费者会自动恢复并继续消费消息。
+`DeclareParams` 用于配置交换机和队列的声明参数。以下是一些可用的参数：
 
-## 重要注意事项
+- `Durable`：是否持久化，默认为 `true`。
+- `AutoDelete`：是否自动删除，默认为 `false`。
+- `Exclusive`：是否排他，默认为 `false`。
+- `NoWait`：是否不等待，默认为 `false`。
+- `Args`：额外的参数，类型为 `amqp.Table`。
 
-- 请确保在使用此库之前，你已经正确安装并配置了 RabbitMQ 服务器。
-- 本库需要使用 Go 模块来管理依赖关系，请确保你的项目启用了 Go 模块。
+### ConnectionOptions
 
-## 贡献
+`ConnectionOptions` 用于配置连接和重连参数。以下是一些可用的参数：
 
-如果你发现任何问题或者有改进建议，请随时提出 Issue 或者提交 Pull Request。
+- `Heartbeat`：心跳间隔，默认为 `0`（禁用心跳）。
+- `ReConnectInterval`：重连间隔，默认为 `0`（禁用重连）。
+- `MaxReconnects`：最大重连次数，默认为 `0`（不限制）。
 
-```
+### ConsumerOptions
 
-你可以将上述内容复制粘贴到你的 README.md 文件中，并根据需要进行修改。最终提交到仓库后，用户就可以根据这份文档来了解和使用你的 RabbitMQ 客户端库了。
+`ConsumerOptions` 用于配置消费者的参数。以下是一些可用的参数：
+
+- `AutoAck`：是否自动确认消息，默认为 `false`。
+- `Exclusive`：是否排他性，默认为 `false`。
+- `RecoverConsumer`：是否在重连后恢复消费者，默认为 `false`。
+- `Callback`：消息处理回调函数。
+
+## 注意事项
+
+- 在使用 `RabbitMQ` 实例后，请确保调用 `Close()` 方法以关闭连接和通道，以释放资源。
+- 当配置交换机和队列时，请确保队列名称不为空，否则会导致错误。
+- 使用自定义配置时，请确保您了解各个配置参数的含义和影响，以便满足您的需求。
+
+这是一个基本的 RabbitMQ Go 客户端的示例和配置指南。您可以根据自己的需求进行定制和扩展。
