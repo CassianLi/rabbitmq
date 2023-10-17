@@ -10,11 +10,13 @@ import (
 
 // DeclareParams exchange and queue declare params
 type DeclareParams struct {
-	Durable    bool       // 持久化,默认true
-	AutoDelete bool       // 自动删除,默认false
-	Exclusive  bool       // 排他性,默认false
-	NoWait     bool       // 不等待,默认false
-	Args       amqp.Table // 额外参数
+	Durable       bool       // 持久化,默认true
+	AutoDelete    bool       // 自动删除,默认false
+	Exclusive     bool       // 排他性,默认false
+	NoWait        bool       // 不等待,默认false
+	Args          amqp.Table // 额外参数
+	PrefetchCount int        // 消费者预取数量,默认0,不限制
+	PrefetchSize  int        // 消费者预取大小,默认0,不限制
 }
 
 // ConnectionOptions 重连等配置参数
@@ -124,6 +126,11 @@ func (mq *RabbitMQ) connectToBroker(amqpURI string, autoCreate bool, params Decl
 		} else {
 			return err
 		}
+	}
+	log.Printf("declared queue params (%v)", params)
+	err = mq.channel.Qos(params.PrefetchCount, params.PrefetchSize, false)
+	if err != nil {
+		return err
 	}
 
 	return nil
